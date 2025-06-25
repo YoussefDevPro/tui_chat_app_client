@@ -4,128 +4,146 @@ mod client;
 
 use crate::auth_tui::AuthMode;
 use auth_tui::run_auth_tui;
-use client::{get_messages, login, register, NetDebug};
+use client::{login, register, NetDebug};
+use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 
+const MESSAGE_LIMIT: usize = 50;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // now the connection PHASE
-    // the user can choose to register an acc or login if account already registered, i made the
-    // tui using ratatui, so bascaly, there is two mode, Register Mode and Login Mode, we change
-    // this variable so the tui can know what to show, like the icon input bar and the textin the
-    // submit button, then it cheks if everythings right , then it go to the chat, unfortunatly, i
-    // still didn't done the chat part yet (there is the tui and it send the message to the server
-    // , just forgot to add a listener so every time someone send a message it show it, an other
-    // data as well), but tommoroy maybe, also, every time we send or receive smt from the server
-    // it log in in the net_debug.log file just for debuging.
+    // ========== NET DEBUG ==========
     let net_debug = NetDebug::new("net_debug.log");
-    let register_closure = |username: &str, password: &str, icon: &str| {
-        let net_debug = net_debug.clone();
-        let (username, password, icon) =
-            (username.to_owned(), password.to_owned(), icon.to_owned());
-        let (tx, rx) = std::sync::mpsc::channel();
 
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(async move {
-                let stream = TcpStream::connect("127.0.0.1:5000")
+    // ========== AUTH PHASE ==========
+
+    // These closures only check if the credentials are accepted by the server (no user_id extraction here)
+    let mut register_closure =
+        |username: &str, password: &str, icon: &str| -> Option<Result<(), String>> {
+            let net_debug = net_debug.clone();
+            let (username, password, icon) =
+                (username.to_owned(), password.to_owned(), icon.to_owned());
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let stream = TcpStream::connect("127.0.0.1:5000")
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut socket_lines = BufReader::new(read_half).lines();
+
+                    match register(
+                        &username,
+                        &password,
+                        &icon,
+                        &mut write_half,
+                        &mut socket_lines,
+                        &net_debug,
+                    )
                     .await
-                    .map_err(|e| e.to_string())?;
-                let (read_half, mut write_half) = stream.into_split();
-                let mut socket_lines = BufReader::new(read_half).lines();
-
-                match register(
-                    &username,
-                    &password,
-                    &icon,
-                    &mut write_half,
-                    &mut socket_lines,
-                    &net_debug,
-                )
-                .await
-                .map_err(|e| e.to_string())
-                {
-                    Ok(resp) => {
-                        if resp.get("success").and_then(|v| v.as_bool()) == Some(true) {
-                            Ok(())
-                        } else {
-                            let msg = resp
-                                .get("error")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown error")
-                                .to_string();
-                            Err(msg)
+                    .map_err(|e| e.to_string())
+                    {
+                        Ok(resp) => {
+                            if resp.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                                tx.send(true).ok();
+                                Ok(())
+                            } else {
+                                let msg = resp
+                                    .get("error")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown error")
+                                    .to_string();
+                                tx.send(false).ok();
+                                Err(msg)
+                            }
+                        }
+                        Err(e) => {
+                            tx.send(false).ok();
+                            Err(e)
                         }
                     }
-                    Err(e) => Err(e),
+                });
+                if let Err(e) = result {
+                    eprintln!("Registration failed: {e}");
                 }
             });
-            tx.send(result).ok();
-        });
 
-        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-            Ok(Ok(())) => Some(Ok(())),
-            Ok(Err(msg)) => Some(Err(msg)),
-            Err(_) => Some(Err("timeout lol".to_string())),
-        }
-    };
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(true) => Some(Ok(())),
+                Ok(false) => Some(Err("Registration failed".to_string())),
+                Err(_) => Some(Err("timeout lol".to_string())),
+            }
+        };
 
-    let login_closure = |username: &str, password: &str, _icon: &str| {
-        let (username, password) = (username.to_owned(), password.to_owned());
-        let (tx, rx) = std::sync::mpsc::channel();
-        let net_debug = net_debug.clone();
+    let mut login_closure =
+        |username: &str, password: &str, _icon: &str| -> Option<Result<(), String>> {
+            let (username, password) = (username.to_owned(), password.to_owned());
+            let net_debug = net_debug.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
 
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(async move {
-                let stream = TcpStream::connect("127.0.0.1:5000")
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let stream = TcpStream::connect("127.0.0.1:5000")
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut socket_lines = BufReader::new(read_half).lines();
+
+                    match login(
+                        &username,
+                        &password,
+                        &mut write_half,
+                        &mut socket_lines,
+                        &net_debug,
+                    )
                     .await
-                    .map_err(|e| e.to_string())?;
-                let (read_half, mut write_half) = stream.into_split();
-                let mut socket_lines = BufReader::new(read_half).lines();
-
-                match login(
-                    &username,
-                    &password,
-                    &mut write_half,
-                    &mut socket_lines,
-                    &net_debug,
-                )
-                .await
-                .map_err(|e| e.to_string())
-                {
-                    Ok(resp) => {
-                        if resp.get("success").and_then(|v| v.as_bool()) == Some(true) {
-                            Ok(())
-                        } else {
-                            let msg = resp
-                                .get("error")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("login failed")
-                                .to_string();
-                            Err(msg)
+                    .map_err(|e| e.to_string())
+                    {
+                        Ok(resp) => {
+                            if resp.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                                tx.send(true).ok();
+                                Ok(())
+                            } else {
+                                let msg = resp
+                                    .get("error")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("login failed")
+                                    .to_string();
+                                tx.send(false).ok();
+                                Err(msg)
+                            }
+                        }
+                        Err(e) => {
+                            tx.send(false).ok();
+                            Err(e)
                         }
                     }
-                    Err(e) => Err(e),
+                });
+                if let Err(e) = result {
+                    eprintln!("Login failed: {e}");
                 }
             });
-            tx.send(result).ok();
-        });
 
-        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-            Ok(Ok(())) => Some(Ok(())),
-            Ok(Err(msg)) => Some(Err(msg)),
-            Err(_) => Some(Err("timeout".to_string())),
-        }
-    };
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(true) => Some(Ok(())),
+                Ok(false) => Some(Err("Login failed".to_string())),
+                Err(_) => Some(Err("timeout lol".to_string())),
+            }
+        };
 
     let mut mode = AuthMode::Register;
 
-    let (username, password, _icon) = loop {
+    // ========== AUTH TUI LOOP ==========
+
+    let (username, password, icon) = loop {
         let auth = match mode {
-            AuthMode::Register => run_auth_tui(AuthMode::Register, register_closure),
-            AuthMode::Login => run_auth_tui(AuthMode::Login, login_closure),
+            AuthMode::Register => run_auth_tui(AuthMode::Register, &mut register_closure),
+            AuthMode::Login => run_auth_tui(AuthMode::Login, &mut login_closure),
         };
 
         if auth.switch_to_login {
@@ -137,16 +155,14 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
         if auth.done {
-            match mode {
-                AuthMode::Register => break (auth.username, auth.password, auth.icon),
-                AuthMode::Login => break (auth.username, auth.password, String::new()),
-            }
+            break (auth.username, auth.password, auth.icon);
         } else {
             return Ok(());
         }
     };
 
-    // ========== FINAL LOGIN CONFIRMATION ==========
+    // ========== FINAL LOGIN and USER_ID EXTRACTION ==========
+
     let stream = TcpStream::connect("127.0.0.1:5000").await?;
     let (read_half, mut write_half) = stream.into_split();
     let mut socket_lines = BufReader::new(read_half).lines();
@@ -158,23 +174,34 @@ async fn main() -> anyhow::Result<()> {
         &net_debug,
     )
     .await?;
+
     if resp.get("success").and_then(|v| v.as_bool()) != Some(true) {
         let err = resp
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or("login sus");
-        // TODO: Replace with error popup in auth_tui
         println!("login fail: {err}");
         return Ok(());
     }
 
+    let user_id = resp
+        .get("data")
+        .and_then(|d| d.get("user_id"))
+        .and_then(|u| u.as_str())
+        .map(|s| s.to_string())
+        .expect("user_id must be set");
+
     // ========== CHAT PHASE ==========
-    // New connection for chat
+
+    let net_debug = NetDebug::new("net_debug.log");
     let stream = TcpStream::connect("127.0.0.1:5000").await?;
     let (read_half, mut write_half) = stream.into_split();
-    let mut socket_lines = BufReader::new(read_half).lines();
+    let reader = BufReader::new(read_half);
+    let mut lines = reader.lines();
 
-    let resp = get_messages(20, &mut write_half, &mut socket_lines, &net_debug).await?;
+    // Get last N messages for initial state
+    let resp = client::get_messages(MESSAGE_LIMIT, &mut write_half, &mut lines, &net_debug).await?;
+
     let mut messages: Vec<String> = Vec::new();
     if let Some(msgs) = resp.get("data").and_then(|v| v.as_array()) {
         for msg in msgs {
@@ -185,7 +212,39 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    chat_tui::run_chat_tui(messages);
+    // Shared message buffer for TUI and receiver
+    let messages = Arc::new(Mutex::new(messages));
+    let messages_for_rx = messages.clone();
+    let net_debug_rx = net_debug.clone();
+
+    // Spawn a Tokio task to receive server messages in real time
+    tokio::spawn(async move {
+        let mut lines = lines;
+        while let Ok(Some(line)) = lines.next_line().await {
+            net_debug_rx.log_recv(&line);
+
+            if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&line) {
+                if let Some(data) = resp.get("data") {
+                    if let Some(content) = data.get("content").and_then(|v| v.as_str()) {
+                        let sender = data.get("sender").and_then(|v| v.as_str()).unwrap_or("??");
+                        let icon = data.get("icon").and_then(|v| v.as_str()).unwrap_or("");
+                        let msg = format!("{icon} {sender}: {content}");
+                        println!("Received: {msg}");
+
+                        let mut msgs = messages_for_rx.lock().unwrap();
+                        msgs.push(msg);
+                        let len = msgs.len();
+                        if len > MESSAGE_LIMIT {
+                            msgs.drain(0..(len - MESSAGE_LIMIT));
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Now run the TUI, which reads from the shared message buffer
+    chat_tui::run_chat_tui(write_half, messages, user_id, net_debug).await;
 
     Ok(())
 }

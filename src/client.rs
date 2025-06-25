@@ -116,19 +116,23 @@ pub async fn send_message(
     sender_id: &str,
     content: &str,
     write_half: &mut OwnedWriteHalf,
-    socket_lines: &mut Lines<BufReader<OwnedReadHalf>>,
     net_debug: &NetDebug,
-) -> Result<serde_json::Value> {
-    let req = json!({
+) -> Result<(), String> {
+    let req = serde_json::json!({
         "action": "send_message",
         "payload": {
             "sender_id": sender_id,
             "content": content
         }
     });
-    send_action(write_half, socket_lines, req, net_debug).await
+    let raw = req.to_string() + "\n";
+    net_debug.log_send(&raw);
+    write_half
+        .write_all(raw.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
-
 pub async fn get_messages(
     limit: usize,
     write_half: &mut OwnedWriteHalf,

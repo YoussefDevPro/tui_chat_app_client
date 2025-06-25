@@ -1,190 +1,191 @@
-use serde_json::json;
-use std::io;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+mod auth_tui;
+mod chat_tui;
+mod client;
+
+use crate::auth_tui::AuthMode;
+use auth_tui::run_auth_tui;
+use client::{get_messages, login, register, NetDebug};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("=== Simple Chat Client ===");
+    // now the connection PHASE
+    // the user can choose to register an acc or login if account already registered, i made the
+    // tui using ratatui, so bascaly, there is two mode, Register Mode and Login Mode, we change
+    // this variable so the tui can know what to show, like the icon input bar and the textin the
+    // submit button, then it cheks if everythings right , then it go to the chat, unfortunatly, i
+    // still didn't done the chat part yet (there is the tui and it send the message to the server
+    // , just forgot to add a listener so every time someone send a message it show it, an other
+    // data as well), but tommoroy maybe, also, every time we send or receive smt from the server
+    // it log in in the net_debug.log file just for debuging.
+    let net_debug = NetDebug::new("net_debug.log");
+    let register_closure = |username: &str, password: &str, icon: &str| {
+        let net_debug = net_debug.clone();
+        let (username, password, icon) =
+            (username.to_owned(), password.to_owned(), icon.to_owned());
+        let (tx, rx) = std::sync::mpsc::channel();
 
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(async move {
+                let stream = TcpStream::connect("127.0.0.1:5000")
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let (read_half, mut write_half) = stream.into_split();
+                let mut socket_lines = BufReader::new(read_half).lines();
+
+                match register(
+                    &username,
+                    &password,
+                    &icon,
+                    &mut write_half,
+                    &mut socket_lines,
+                    &net_debug,
+                )
+                .await
+                .map_err(|e| e.to_string())
+                {
+                    Ok(resp) => {
+                        if resp.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                            Ok(())
+                        } else {
+                            let msg = resp
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown error")
+                                .to_string();
+                            Err(msg)
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            });
+            tx.send(result).ok();
+        });
+
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(())) => Some(Ok(())),
+            Ok(Err(msg)) => Some(Err(msg)),
+            Err(_) => Some(Err("timeout lol".to_string())),
+        }
+    };
+
+    let login_closure = |username: &str, password: &str, _icon: &str| {
+        let (username, password) = (username.to_owned(), password.to_owned());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let net_debug = net_debug.clone();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(async move {
+                let stream = TcpStream::connect("127.0.0.1:5000")
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let (read_half, mut write_half) = stream.into_split();
+                let mut socket_lines = BufReader::new(read_half).lines();
+
+                match login(
+                    &username,
+                    &password,
+                    &mut write_half,
+                    &mut socket_lines,
+                    &net_debug,
+                )
+                .await
+                .map_err(|e| e.to_string())
+                {
+                    Ok(resp) => {
+                        if resp.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                            Ok(())
+                        } else {
+                            let msg = resp
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("login failed")
+                                .to_string();
+                            Err(msg)
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            });
+            tx.send(result).ok();
+        });
+
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(())) => Some(Ok(())),
+            Ok(Err(msg)) => Some(Err(msg)),
+            Err(_) => Some(Err("timeout".to_string())),
+        }
+    };
+
+    let mut mode = AuthMode::Register;
+
+    let (username, password, _icon) = loop {
+        let auth = match mode {
+            AuthMode::Register => run_auth_tui(AuthMode::Register, register_closure),
+            AuthMode::Login => run_auth_tui(AuthMode::Login, login_closure),
+        };
+
+        if auth.switch_to_login {
+            mode = AuthMode::Login;
+            continue;
+        }
+        if auth.switch_to_register {
+            mode = AuthMode::Register;
+            continue;
+        }
+        if auth.done {
+            match mode {
+                AuthMode::Register => break (auth.username, auth.password, auth.icon),
+                AuthMode::Login => break (auth.username, auth.password, String::new()),
+            }
+        } else {
+            return Ok(());
+        }
+    };
+
+    // ========== FINAL LOGIN CONFIRMATION ==========
     let stream = TcpStream::connect("127.0.0.1:5000").await?;
     let (read_half, mut write_half) = stream.into_split();
     let mut socket_lines = BufReader::new(read_half).lines();
-    let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
-
-    // Registration or login
-    println!("Register or login? [r/l]: ");
-    let mode = stdin_lines.next_line().await?.unwrap_or_default();
-    let (username, password, icon, mut user_id);
-
-    if mode.trim() == "r" {
-        println!("Username: ");
-        username = stdin_lines.next_line().await?.unwrap_or_default();
-        println!("Password: ");
-        password = stdin_lines.next_line().await?.unwrap_or_default();
-        println!("Icon (Nerd Font, copy/paste): ");
-        icon = stdin_lines.next_line().await?.unwrap_or_default();
-
-        let register = json!({
-            "action": "register",
-            "payload": {
-                "username": username,
-                "password": password,
-                "icon": icon
-            }
-        });
-        write_half
-            .write_all(serde_json::to_string(&register)?.as_bytes())
-            .await?;
-        write_half.write_all(b"\n").await?;
-    } else {
-        println!("Username: ");
-        username = stdin_lines.next_line().await?.unwrap_or_default();
-        println!("Password: ");
-        password = stdin_lines.next_line().await?.unwrap_or_default();
-        icon = "".to_owned();
-
-        let login = json!({
-            "action": "login",
-            "payload": {
-                "username": username,
-                "password": password
-            }
-        });
-        write_half
-            .write_all(serde_json::to_string(&login)?.as_bytes())
-            .await?;
-        write_half.write_all(b"\n").await?;
-    }
-
-    // Read the server response and extract user_id
-    user_id = String::new();
-    if let Some(resp) = socket_lines.next_line().await? {
-        println!("Server: {resp}");
-        let resp_json: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
-        user_id = resp_json
-            .get("data")
-            .and_then(|d| d.get("user_id"))
+    let resp = login(
+        &username,
+        &password,
+        &mut write_half,
+        &mut socket_lines,
+        &net_debug,
+    )
+    .await?;
+    if resp.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        let err = resp
+            .get("error")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if user_id.is_empty() {
-            println!("Failed to get user_id. Exiting.");
-            return Ok(());
-        }
-        println!("Logged in as: {username}");
+            .unwrap_or("login sus");
+        // TODO: Replace with error popup in auth_tui
+        println!("login fail: {err}");
+        return Ok(());
     }
 
-    println!("Type a message, or use /get /ban /unban /promote /rename /icon /quit");
+    // ========== CHAT PHASE ==========
+    // New connection for chat
+    let stream = TcpStream::connect("127.0.0.1:5000").await?;
+    let (read_half, mut write_half) = stream.into_split();
+    let mut socket_lines = BufReader::new(read_half).lines();
 
-    loop {
-        print!("> ");
-        io::Write::flush(&mut io::stdout())?;
-        let input = stdin_lines.next_line().await?.unwrap_or_default();
-        if input == "/quit" {
-            break;
-        }
-        if input == "/get" {
-            let get = json!({
-                "action": "get_messages",
-                "payload": { "limit": 10 }
-            });
-            write_half
-                .write_all(serde_json::to_string(&get)?.as_bytes())
-                .await?;
-            write_half.write_all(b"\n").await?;
-        } else if input.starts_with("/ban ") {
-            let args: Vec<&str> = input["/ban ".len()..].split_whitespace().collect();
-            if args.len() < 2 {
-                println!("Usage: /ban <target_id> <reason>");
-                continue;
-            }
-            let target_id = args[0];
-            let reason = args[1..].join(" ");
-            let ban = json!({
-                "action": "ban_user",
-                "payload": {
-                    "admin_id": user_id,
-                    "target_id": target_id,
-                    "reason": reason
-                }
-            });
-            write_half
-                .write_all(serde_json::to_string(&ban)?.as_bytes())
-                .await?;
-            write_half.write_all(b"\n").await?;
-        } else if input.starts_with("/unban ") {
-            let target_id = input["/unban ".len()..].trim();
-            let unban = json!({
-                "action": "unban_user",
-                "payload": {
-                    "admin_id": user_id,
-                    "target_id": target_id
-                }
-            });
-            write_half
-                .write_all(serde_json::to_string(&unban)?.as_bytes())
-                .await?;
-            write_half.write_all(b"\n").await?;
-        } else if input.starts_with("/promote ") {
-            let target_id = input["/promote ".len()..].trim();
-            let promote = json!({
-                "action": "promote_user",
-                "payload": {
-                    "admin_id": user_id,
-                    "target_id": target_id
-                }
-            });
-            write_half
-                .write_all(serde_json::to_string(&promote)?.as_bytes())
-                .await?;
-            write_half.write_all(b"\n").await?;
-        } else if input.starts_with("/rename ") {
-            let new_username = input["/rename ".len()..].trim();
-            let rename = json!({
-                "action": "change_username",
-                "payload": {
-                    "user_id": user_id,
-                    "new_username": new_username
-                }
-            });
-            write_half
-                .write_all(serde_json::to_string(&rename)?.as_bytes())
-                .await?;
-            write_half.write_all(b"\n").await?;
-        } else if input.starts_with("/icon ") {
-            let new_icon = input["/icon ".len()..].trim();
-            let icon = json!({
-                "action": "change_icon",
-                "payload": {
-                    "user_id": user_id,
-                    "new_icon": new_icon
-                }
-            });
-            write_half
-                .write_all(serde_json::to_string(&icon)?.as_bytes())
-                .await?;
-            write_half.write_all(b"\n").await?;
-        } else {
-            let msg = json!({
-                "action": "send_message",
-                "payload": {
-                    "sender_id": user_id,
-                    "content": input
-                }
-            });
-            write_half
-                .write_all(serde_json::to_string(&msg)?.as_bytes())
-                .await?;
-            write_half.write_all(b"\n").await?;
-        }
-
-        // Print any message or response from the server
-        if let Some(line) = socket_lines.next_line().await? {
-            println!("[Server] {line}");
+    let resp = get_messages(20, &mut write_half, &mut socket_lines, &net_debug).await?;
+    let mut messages: Vec<String> = Vec::new();
+    if let Some(msgs) = resp.get("data").and_then(|v| v.as_array()) {
+        for msg in msgs {
+            let sender = msg.get("sender").and_then(|v| v.as_str()).unwrap_or("??");
+            let icon = msg.get("icon").and_then(|v| v.as_str()).unwrap_or("");
+            let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            messages.push(format!("{icon} {sender}: {content}"));
         }
     }
 
-    println!("Goodbye!");
+    chat_tui::run_chat_tui(messages);
+
     Ok(())
 }

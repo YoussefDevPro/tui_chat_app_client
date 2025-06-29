@@ -25,6 +25,8 @@ pub struct Theme {
     pub text: Rgb,
 }
 
+// very unoptimized code, double function and stuff, still working on it
+
 pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<String>) {
     if let Event::Key(KeyEvent {
         code, modifiers, ..
@@ -33,7 +35,8 @@ pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<Strin
         let reg_mode = app.auth_mode == AuthMode::Register;
         let input_count = if reg_mode { 3 } else { 2 };
         let btn_idx = input_count;
-        let icon_idx = if reg_mode { 2 } else { 0 };
+
+        let icon_picker_input_idx = 2;
 
         match code {
             KeyCode::Tab => {
@@ -52,10 +55,18 @@ pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<Strin
             KeyCode::Char('L') => {
                 app.auth_mode = AuthMode::Login;
                 app.focus = 0;
+                app.input_boxes[0].value.clear();
+                app.input_boxes[1].value.clear();
+                app.input_boxes[0].cursor = 0;
+                app.input_boxes[1].cursor = 0;
             }
             KeyCode::Char('R') => {
                 app.auth_mode = AuthMode::Register;
                 app.focus = 0;
+                app.input_boxes[0].value.clear();
+                app.input_boxes[1].value.clear();
+                app.input_boxes[0].cursor = 0;
+                app.input_boxes[1].cursor = 0;
             }
             KeyCode::Char('Q') => {
                 app.should_quit = true;
@@ -67,6 +78,10 @@ pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<Strin
                     AuthMode::Register
                 };
                 app.focus = 0;
+                app.input_boxes[0].value.clear();
+                app.input_boxes[1].value.clear();
+                app.input_boxes[0].cursor = 0;
+                app.input_boxes[1].cursor = 0;
             }
             KeyCode::Enter => {
                 if app.focus == btn_idx && !app.is_loading {
@@ -74,7 +89,7 @@ pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<Strin
                     app.error = None;
                     let username = app.input_boxes[0].value.trim().to_string();
                     let password = app.input_boxes[1].value.trim().to_string();
-                    let api_base = "http://localhost:8000";
+                    let api_base = "http://back.reetui.hackclub.app";
 
                     if username.is_empty() || password.is_empty() {
                         app.error = Some("Username and Password required".into());
@@ -94,8 +109,7 @@ pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<Strin
                     };
                     match res {
                         Ok(token) => {
-                            app.token = Some(token.token.clone()); // yeah, token have a token :3
-                                                                   // < - here we can save the token, but i don't think so
+                            app.token = Some(token.token.clone());
                             app.page = crate::app::Page::Home;
                         }
                         Err(e) => {
@@ -117,23 +131,32 @@ pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<Strin
                     app.is_loading = false;
                 }
             }
-            KeyCode::Char(c) if app.focus < input_count && app.focus != icon_idx => {
+            KeyCode::Char(c)
+                if app.focus < input_count
+                    && (app.focus == 0
+                        || app.focus == 1
+                        || (reg_mode && app.focus == icon_picker_input_idx)) =>
+            {
                 app.input_boxes[app.focus].value.push(c);
                 app.input_boxes[app.focus].cursor += 1;
             }
-            KeyCode::Backspace if app.focus < input_count && app.focus != icon_idx => {
+            KeyCode::Backspace
+                if app.focus < input_count
+                    && (app.focus == 0
+                        || app.focus == 1
+                        || (reg_mode && app.focus == icon_picker_input_idx)) =>
+            {
                 if app.input_boxes[app.focus].cursor > 0 {
                     app.input_boxes[app.focus].value.pop();
                     app.input_boxes[app.focus].cursor -= 1;
                 }
             }
-            // ICON PICKER: left/right navigation
-            KeyCode::Left if reg_mode && app.focus == icon_idx => {
+            KeyCode::Left if reg_mode && app.focus == icon_picker_input_idx => {
                 let len = app.icons.len();
                 app.icon_index = (app.icon_index + len - 1) % len;
                 app.current_icon = app.icons[app.icon_index].to_string();
             }
-            KeyCode::Right if reg_mode && app.focus == icon_idx => {
+            KeyCode::Right if reg_mode && app.focus == icon_picker_input_idx => {
                 let len = app.icons.len();
                 app.icon_index = (app.icon_index + 1) % len;
                 app.current_icon = app.icons[app.icon_index].to_string();
@@ -156,7 +179,6 @@ fn get_theme() -> Theme {
 pub fn ui(f: &mut Frame, app: &mut App) {
     let theme = get_theme();
 
-    // Wipe background
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Reset).fg(Color::Reset)),
         f.area(),
@@ -165,13 +187,11 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     let reg_mode = app.auth_mode == AuthMode::Register;
     let visible_inputs = if reg_mode { 3 } else { 2 };
     let btn_idx = visible_inputs;
-    // Each input: 3 lines, no space between inputs, +1 spacer before button, +3 for button, +2 for top/bottom margin
     let box_width = 38;
     let box_height = (visible_inputs as u16 * 3) + 1 + 3 + 2;
 
     let main_area = fixed_rect_in_center(f.area(), box_width, box_height);
 
-    // Outer border box
     let box_title = if reg_mode { "Register" } else { "Login" };
     f.render_widget(
         Block::default()
@@ -187,7 +207,6 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         main_area,
     );
 
-    // Area inside the border
     let inner = Rect {
         x: main_area.x + 1,
         y: main_area.y + 1,
@@ -195,20 +214,18 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         height: main_area.height.saturating_sub(2),
     };
 
-    // Constraints: n inputs (3 lines each), 1 spacer, button (3 lines)
     let mut constraints = Vec::with_capacity(visible_inputs * 3 + 2);
     for _ in 0..visible_inputs {
-        constraints.push(Constraint::Length(3)); // input bar
+        constraints.push(Constraint::Length(3));
     }
-    constraints.push(Constraint::Length(1)); // spacer before button
-    constraints.push(Constraint::Length(3)); // button
+    constraints.push(Constraint::Length(1));
+    constraints.push(Constraint::Length(3));
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(inner);
 
-    // Icon picker index is always 2 if in register mode
     let icon_idx = 2;
 
     for (idx, input) in app.input_boxes.iter().take(visible_inputs).enumerate() {
@@ -223,12 +240,10 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         };
 
         if reg_mode && idx == icon_idx {
-            // Improved: Show 5 icons, center = selected, 2 left, 2 right, wrap around
             let icons = &app.icons;
             let center = app.icon_index;
             let len = icons.len();
 
-            // Get 5 indices: (center-2)..(center+2), wrapping
             let indices: Vec<usize> = (-2..=2)
                 .map(|offset| ((center as isize + offset + len as isize) % len as isize) as usize)
                 .collect();
@@ -236,7 +251,6 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             let mut spans = Vec::with_capacity(5 * 2 - 1);
 
             for (pos, &i) in indices.iter().enumerate() {
-                // Style: center (selected) is highlighted, others are gray
                 if pos == 2 {
                     spans.push(Span::styled(
                         icons[i],
@@ -273,7 +287,6 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 );
             f.render_widget(icon_para, input_area);
         } else {
-            // Normal input
             f.render_widget(
                 Paragraph::new(input.display())
                     .style(Style::default().fg(rgb_to_color(&theme.text)))
@@ -295,7 +308,6 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         }
     }
 
-    // Button (3 lines), after the spacer
     let btn_focus = app.focus == btn_idx;
     let btn_label = if reg_mode {
         if app.is_loading {
@@ -337,7 +349,6 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         );
     f.render_widget(btn_para, btn_area);
 
-    // Help label at the bottom of the terminal
     let help_text = if reg_mode {
         "Already have an account? Press [L] to switch to Login."
     } else {
@@ -351,7 +362,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .add_modifier(Modifier::ITALIC),
         ),
         Span::styled(
-            "   Q: Quit   Tab/Shift+Tab: Move | Enter: Submit",
+            "    Q: Quit    Tab/Shift+Tab: Move | Enter: Submit",
             Style::default().fg(Color::Gray),
         ),
     ]);
@@ -373,7 +384,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         let error_area = Rect {
             x: 1,
             y: 0,
-            width: f.area().width.min(48), // up to 48 chars wide
+            width: f.area().width.min(48),
             height: 1,
         };
         f.render_widget(
@@ -391,7 +402,6 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Helper: give a rect of fixed size (w, h) centered inside parent
 fn fixed_rect_in_center(area: Rect, width: u16, height: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;

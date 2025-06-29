@@ -16,6 +16,8 @@ use tokio::sync::mpsc;
 
 use app::{App, Page};
 
+// don't worry guys, im too lazy to write comments, also im trying to organize this lasagna code
+
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
     enable_raw_mode()?;
@@ -33,10 +35,9 @@ async fn main() -> Result<(), io::Error> {
 
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
-    let ws_url = "ws://localhost:9001";
+    let ws_url = "ws://isock.reetui.hackclub.app";
 
     loop {
-        // 1. Process incoming chat messages to update app state
         while let Ok(msg) = chat_rx.try_recv() {
             let mut app_lock = app.lock().unwrap();
             app_lock.chat_messages.push(msg);
@@ -45,7 +46,6 @@ async fn main() -> Result<(), io::Error> {
             }
         }
 
-        // 2. Start websocket thread once after login (when token is available)
         {
             let app_lock = app.lock().unwrap();
             if !ws_started {
@@ -58,7 +58,6 @@ async fn main() -> Result<(), io::Error> {
             }
         }
 
-        // 3. Draw UI
         {
             let mut app_lock = app.lock().unwrap();
             terminal.draw(|f| match app_lock.page {
@@ -71,7 +70,6 @@ async fn main() -> Result<(), io::Error> {
             })?;
         }
 
-        // 4. Handle input
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
@@ -88,7 +86,6 @@ async fn main() -> Result<(), io::Error> {
             }
         }
 
-        // 5. Tick & housekeeping
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
         }

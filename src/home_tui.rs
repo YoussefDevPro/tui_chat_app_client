@@ -37,13 +37,11 @@ pub fn handle_event(evt: Event, app: &mut App) {
 pub fn ui(f: &mut Frame, _app: &App) {
     let area = f.area();
 
-    // Convert ASCII art to Lines for ratatui 0.29+
     let lines: Vec<Line> = ART.lines().map(|l| Line::from(Span::raw(l))).collect();
     let art_height = lines.len() as u16;
 
-    // Center the art vertically
     let art_area = {
-        let art_y = area.y + (area.height.saturating_sub(art_height + 4)) / 2; // +4 for bottom text space
+        let art_y = area.y + (area.height.saturating_sub(art_height + 4)) / 2;
         Rect {
             x: area.x,
             y: art_y,
@@ -52,12 +50,10 @@ pub fn ui(f: &mut Frame, _app: &App) {
         }
     };
 
-    // Art (no border)
     f.render_widget(Clear, art_area);
     let ascii = Paragraph::new(lines).alignment(Alignment::Center);
     f.render_widget(ascii, art_area);
 
-    // Copilot notice, second to last line
     let copilot_area = Rect {
         x: area.x,
         y: area.y + area.height.saturating_sub(2),
@@ -69,7 +65,6 @@ pub fn ui(f: &mut Frame, _app: &App) {
         .style(Style::default().fg(Color::Gray));
     f.render_widget(copilot, copilot_area);
 
-    // "ReeTui inc." just above the copilot notice
     let footer_area = Rect {
         x: area.x,
         y: area.y + area.height.saturating_sub(3),
@@ -81,7 +76,6 @@ pub fn ui(f: &mut Frame, _app: &App) {
         .style(Style::default().fg(Color::Green));
     f.render_widget(footer_text, footer_area);
 
-    // "Press any key to continue" just above "ReeTui inc."
     let press_area = Rect {
         x: area.x,
         y: area.y + area.height.saturating_sub(5),

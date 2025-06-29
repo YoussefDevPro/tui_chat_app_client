@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::time::Instant;
 
 pub enum Page {
@@ -43,7 +44,7 @@ pub struct App {
     pub input_boxes: Vec<InputBox>,
     pub focus: usize,
     pub error: Option<String>,
-    pub error_time: Option<Instant>, // <-- add this line
+    pub error_time: Option<Instant>,
     pub token: Option<String>,
     pub is_loading: bool,
     pub chat_messages: Vec<crate::chat_tui::ChatMessage>,
@@ -59,6 +60,8 @@ pub struct App {
     pub last_sent: Option<std::time::Instant>,
     pub auto_scroll: bool,
     pub max_scroll: u16,
+    pub cursor_tick_state: bool,
+    pub last_cursor_toggle: Instant,
 }
 
 impl App {
@@ -73,7 +76,7 @@ impl App {
             ],
             focus: 0,
             error: None,
-            error_time: None, // <-- initialize here
+            error_time: None,
             token: None,
             is_loading: false,
             chat_input: String::new(),
@@ -122,6 +125,13 @@ impl App {
                 "",
                 "",
                 "",
+                "󰇶",
+                "󰻟",
+                "",
+                "",
+                "󰣑",
+                "󰢮",
+                "",
             ],
             current_icon: String::new(),
             input_cursor: 0,
@@ -131,6 +141,8 @@ impl App {
             last_sent: None,
             auto_scroll: true,
             max_scroll: 0,
+            cursor_tick_state: true,
+            last_cursor_toggle: Instant::now(),
         }
     }
 }

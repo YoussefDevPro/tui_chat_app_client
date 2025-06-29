@@ -1,16 +1,16 @@
-use crate::api::login_or_register;
+use crate::api::{login, register};
 use crate::app::{App, AuthMode};
 use crate::mpsc::UnboundedSender;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use directories::ProjectDirs;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
 use serde::Deserialize;
+use std::time::Instant;
 use std::{fs, path::PathBuf};
 
 #[derive(Deserialize, Clone, Debug)]
@@ -22,40 +22,10 @@ pub struct Theme {
     pub border_focus: Rgb,
     pub button: Rgb,
     pub button_focus: Rgb,
-    pub error_bg: Rgb,
-    pub error_fg: Rgb,
     pub text: Rgb,
-    pub input_hover: Rgb,
 }
 
 pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<String>) {
-    if app.show_cmd_popup {
-        if let Event::Key(KeyEvent { code, .. }) = evt {
-            match code {
-                KeyCode::Esc => {
-                    app.show_cmd_popup = false;
-                    app.cmd_input.clear();
-                }
-                KeyCode::Enter => {
-                    let cmd = app.cmd_input.trim();
-                    if cmd == "q" || cmd == "quit" {
-                        app.should_quit = true;
-                    }
-                    app.show_cmd_popup = false;
-                    app.cmd_input.clear();
-                }
-                KeyCode::Char(c) => {
-                    app.cmd_input.push(c);
-                }
-                KeyCode::Backspace => {
-                    app.cmd_input.pop();
-                }
-                _ => {}
-            }
-        }
-        return;
-    }
-
     if let Event::Key(KeyEvent {
         code, modifiers, ..
     }) = evt
@@ -63,6 +33,7 @@ pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<Strin
         let reg_mode = app.auth_mode == AuthMode::Register;
         let input_count = if reg_mode { 3 } else { 2 };
         let btn_idx = input_count;
+        let icon_idx = if reg_mode { 2 } else { 0 };
 
         match code {
             KeyCode::Tab => {
@@ -86,11 +57,10 @@ pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<Strin
                 app.auth_mode = AuthMode::Register;
                 app.focus = 0;
             }
-            KeyCode::Char(':') => {
-                app.show_cmd_popup = true;
-                app.cmd_input.clear();
+            KeyCode::Char('Q') => {
+                app.should_quit = true;
             }
-            KeyCode::Char('T') if modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
                 app.auth_mode = if app.auth_mode == AuthMode::Register {
                     AuthMode::Login
                 } else {
@@ -108,32 +78,65 @@ pub async fn handle_event(evt: Event, app: &mut App, _tx: &UnboundedSender<Strin
 
                     if username.is_empty() || password.is_empty() {
                         app.error = Some("Username and Password required".into());
+                        app.error_time = Some(Instant::now());
+                        app.input_boxes[0].value.clear();
+                        app.input_boxes[1].value.clear();
+                        app.input_boxes[0].cursor = 0;
+                        app.input_boxes[1].cursor = 0;
                         app.is_loading = false;
                         return;
                     }
 
-                    let res = login_or_register(&username, &password, api_base).await;
+                    let res = if reg_mode {
+                        register(&username, &password, &app.current_icon, api_base).await
+                    } else {
+                        login(&username, &password, api_base).await
+                    };
                     match res {
                         Ok(token) => {
-                            app.token = Some(token.clone());
+                            app.token = Some(token.token.clone()); // yeah, token have a token :3
+                                                                   // < - here we can save the token, but i don't think so
                             app.page = crate::app::Page::Home;
                         }
                         Err(e) => {
-                            app.error = Some(e);
+                            let err_msg = if e.contains("409") {
+                                "409: User already exists, use a pretty name :3".to_string()
+                            } else if e.contains("401") {
+                                "Incorrect password, ya forgot ? it's 1234 ofc".to_string()
+                            } else {
+                                e
+                            };
+                            app.error = Some(err_msg);
+                            app.error_time = Some(Instant::now());
+                            app.input_boxes[0].value.clear();
+                            app.input_boxes[1].value.clear();
+                            app.input_boxes[0].cursor = 0;
+                            app.input_boxes[1].cursor = 0;
                         }
                     }
                     app.is_loading = false;
                 }
             }
-            KeyCode::Char(c) if app.focus < input_count => {
+            KeyCode::Char(c) if app.focus < input_count && app.focus != icon_idx => {
                 app.input_boxes[app.focus].value.push(c);
                 app.input_boxes[app.focus].cursor += 1;
             }
-            KeyCode::Backspace if app.focus < input_count => {
+            KeyCode::Backspace if app.focus < input_count && app.focus != icon_idx => {
                 if app.input_boxes[app.focus].cursor > 0 {
                     app.input_boxes[app.focus].value.pop();
                     app.input_boxes[app.focus].cursor -= 1;
                 }
+            }
+            // ICON PICKER: left/right navigation
+            KeyCode::Left if reg_mode && app.focus == icon_idx => {
+                let len = app.icons.len();
+                app.icon_index = (app.icon_index + len - 1) % len;
+                app.current_icon = app.icons[app.icon_index].to_string();
+            }
+            KeyCode::Right if reg_mode && app.focus == icon_idx => {
+                let len = app.icons.len();
+                app.icon_index = (app.icon_index + 1) % len;
+                app.current_icon = app.icons[app.icon_index].to_string();
             }
             _ => {}
         }
@@ -150,73 +153,67 @@ fn get_theme() -> Theme {
     serde_json::from_str(&data).expect("Invalid theme.json")
 }
 
-/// Returns the config dir for .config/reetui or Windows equivalent
-pub fn config_dir() -> PathBuf {
-    if let Some(proj_dirs) = ProjectDirs::from("com", "ReeTui", "ReeTui") {
-        proj_dirs.config_dir().to_path_buf()
-    } else {
-        PathBuf::from(".")
-    }
-}
-
-pub fn save_token(token: &str) {
-    let dir = config_dir();
-    if !dir.exists() {
-        let _ = fs::create_dir_all(&dir);
-    }
-    let mut path = dir.clone();
-    path.push("token");
-    fs::write(path, token).unwrap();
-}
-
 pub fn ui(f: &mut Frame, app: &mut App) {
     let theme = get_theme();
 
-    // Blank background
-    let blank = Block::default()
-        .style(Style::default().bg(Color::Reset).fg(Color::Reset))
-        .borders(Borders::NONE);
-    f.render_widget(blank, f.area());
+    // Wipe background
+    f.render_widget(
+        Block::default().style(Style::default().bg(Color::Reset).fg(Color::Reset)),
+        f.area(),
+    );
 
-    // Main centered box (percent for centering)
-    let main_area = centered_rect(50, 50, f.area());
-
-    // Layout: [inputs][button][help]
     let reg_mode = app.auth_mode == AuthMode::Register;
-    let input_count = if reg_mode { 3 } else { 2 };
-    let mut constraints = vec![Constraint::Length(4); input_count];
-    constraints.push(Constraint::Length(4)); // Button
-    constraints.push(Constraint::Length(2)); // Help row
-    let layout = Layout::default()
+    let visible_inputs = if reg_mode { 3 } else { 2 };
+    let btn_idx = visible_inputs;
+    // Each input: 3 lines, no space between inputs, +1 spacer before button, +3 for button, +2 for top/bottom margin
+    let box_width = 38;
+    let box_height = (visible_inputs as u16 * 3) + 1 + 3 + 2;
+
+    let main_area = fixed_rect_in_center(f.area(), box_width, box_height);
+
+    // Outer border box
+    let box_title = if reg_mode { "Register" } else { "Login" };
+    f.render_widget(
+        Block::default()
+            .title(Span::styled(
+                box_title,
+                Style::default()
+                    .fg(rgb_to_color(&theme.text))
+                    .add_modifier(Modifier::BOLD | Modifier::ITALIC),
+            ))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(rgb_to_color(&theme.border))),
+        main_area,
+    );
+
+    // Area inside the border
+    let inner = Rect {
+        x: main_area.x + 1,
+        y: main_area.y + 1,
+        width: main_area.width.saturating_sub(2),
+        height: main_area.height.saturating_sub(2),
+    };
+
+    // Constraints: n inputs (3 lines each), 1 spacer, button (3 lines)
+    let mut constraints = Vec::with_capacity(visible_inputs * 3 + 2);
+    for _ in 0..visible_inputs {
+        constraints.push(Constraint::Length(3)); // input bar
+    }
+    constraints.push(Constraint::Length(1)); // spacer before button
+    constraints.push(Constraint::Length(3)); // button
+
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .margin(2)
-        .split(main_area);
+        .split(inner);
 
-    // Box with rounded border
-    let block = Block::default()
-        .title(Span::styled(
-            if reg_mode { "Register" } else { "Login" },
-            Style::default()
-                .fg(rgb_to_color(&theme.text))
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(rgb_to_color(&theme.border)));
-    f.render_widget(Clear, main_area);
-    f.render_widget(block, main_area);
+    // Icon picker index is always 2 if in register mode
+    let icon_idx = 2;
 
-    // Input fields (fixed width/height)
-    for idx in 0..input_count {
+    for (idx, input) in app.input_boxes.iter().take(visible_inputs).enumerate() {
         let focus = app.focus == idx;
-        let style = if focus {
-            Style::default()
-                .fg(rgb_to_color(&theme.text))
-                .bg(rgb_to_color(&theme.input_hover))
-        } else {
-            Style::default().fg(rgb_to_color(&theme.text))
-        };
+        let input_area = rows[idx];
         let border_style = if focus {
             Style::default()
                 .fg(rgb_to_color(&theme.border_focus))
@@ -224,23 +221,81 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         } else {
             Style::default().fg(rgb_to_color(&theme.border))
         };
-        let input = &app.input_boxes[idx];
-        let para = Paragraph::new(format!("{}: {}", input.label, input.display()))
-            .style(style)
-            .alignment(Alignment::Left)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(border_style)
-                    .title(Span::styled("", Style::default())),
+
+        if reg_mode && idx == icon_idx {
+            // Improved: Show 5 icons, center = selected, 2 left, 2 right, wrap around
+            let icons = &app.icons;
+            let center = app.icon_index;
+            let len = icons.len();
+
+            // Get 5 indices: (center-2)..(center+2), wrapping
+            let indices: Vec<usize> = (-2..=2)
+                .map(|offset| ((center as isize + offset + len as isize) % len as isize) as usize)
+                .collect();
+
+            let mut spans = Vec::with_capacity(5 * 2 - 1);
+
+            for (pos, &i) in indices.iter().enumerate() {
+                // Style: center (selected) is highlighted, others are gray
+                if pos == 2 {
+                    spans.push(Span::styled(
+                        icons[i],
+                        Style::default()
+                            .fg(rgb_to_color(&theme.button_focus))
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        icons[i],
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                    ));
+                }
+                if pos != 4 {
+                    spans.push(Span::raw(" "));
+                }
+            }
+
+            let icon_para = Paragraph::new(Line::from(spans))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(border_style)
+                        .title(Span::styled(
+                            input.label.clone(),
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::ITALIC),
+                        )),
+                );
+            f.render_widget(icon_para, input_area);
+        } else {
+            // Normal input
+            f.render_widget(
+                Paragraph::new(input.display())
+                    .style(Style::default().fg(rgb_to_color(&theme.text)))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .border_style(border_style)
+                            .title(Span::styled(
+                                input.label.clone(),
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::ITALIC),
+                            )),
+                    )
+                    .alignment(Alignment::Left),
+                input_area,
             );
-        let field_area = fixed_rect_in_center(layout[idx], 14, 3);
-        f.render_widget(para, field_area);
+        }
     }
 
-    // Button (fixed)
-    let btn_idx = input_count;
+    // Button (3 lines), after the spacer
     let btn_focus = app.focus == btn_idx;
     let btn_label = if reg_mode {
         if app.is_loading {
@@ -260,96 +315,80 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             .fg(rgb_to_color(&theme.button_focus))
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(rgb_to_color(&theme.button))
+        Style::default()
+            .fg(rgb_to_color(&theme.button))
+            .add_modifier(Modifier::BOLD)
     };
-    let btn = Paragraph::new(Span::styled(btn_label, btn_style))
+    let btn_area = rows[btn_idx + 1];
+    let btn_para = Paragraph::new(Span::styled(btn_label, btn_style))
         .alignment(Alignment::Center)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(btn_style),
+                .border_style(if btn_focus {
+                    Style::default()
+                        .fg(rgb_to_color(&theme.button_focus))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(rgb_to_color(&theme.button))
+                })
+                .title(""),
         );
-    let btn_area = fixed_rect_in_center(layout[btn_idx], 20, 4);
-    f.render_widget(btn, btn_area);
+    f.render_widget(btn_para, btn_area);
 
-    // Help label at the bottom of the box (left aligned)
+    // Help label at the bottom of the terminal
     let help_text = if reg_mode {
         "Already have an account? Press [L] to switch to Login."
     } else {
         "Don't have an account? Press [R] to switch to Register."
     };
     let help_line = Line::from(vec![
-        Span::styled(help_text, Style::default().fg(Color::DarkGray)),
         Span::styled(
-            "   : for command   Tab/Shift+Tab: Move | Enter: Submit",
+            help_text,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ),
+        Span::styled(
+            "   Q: Quit   Tab/Shift+Tab: Move | Enter: Submit",
             Style::default().fg(Color::Gray),
         ),
     ]);
-    let para = Paragraph::new(help_line)
-        .alignment(Alignment::Left)
-        .block(Block::default().borders(Borders::NONE));
-    f.render_widget(para, layout[input_count + 1]);
-
-    // Error popup
-    if let Some(ref err) = app.error {
-        let popup_area = centered_rect(40, 5, f.area());
-        let err_block = Block::default()
-            .title("Error")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .style(
-                Style::default()
-                    .fg(rgb_to_color(&theme.error_fg))
-                    .bg(rgb_to_color(&theme.error_bg)),
-            );
-        let err_para = Paragraph::new(err.as_str())
-            .alignment(Alignment::Center)
-            .block(err_block);
-        f.render_widget(Clear, popup_area);
-        f.render_widget(err_para, popup_area);
-    }
-
-    // Command popup
-    if app.show_cmd_popup {
-        let popup_area = centered_rect(30, 5, f.area());
-        let block = Block::default()
-            .title("Command")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::White));
-        let cmd_line = Line::from(vec![
-            Span::styled(":", Style::default().fg(Color::Yellow)),
-            Span::raw(&app.cmd_input),
-        ]);
-        let para = Paragraph::new(cmd_line)
+    let area = f.area();
+    let bottom_area = Rect {
+        x: area.x + 1,
+        y: area.y + area.height.saturating_sub(2),
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(help_line)
             .alignment(Alignment::Left)
-            .block(block);
-        f.render_widget(Clear, popup_area);
-        f.render_widget(para, popup_area);
-    }
-}
+            .block(Block::default().borders(Borders::NONE)),
+        bottom_area,
+    );
 
-/// Helper: center a rect (percent)
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-    let vertical = popup_layout[1];
-    let horizontal_layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical);
-    horizontal_layout[1]
+    if let Some(ref err) = app.error {
+        let error_area = Rect {
+            x: 1,
+            y: 0,
+            width: f.area().width.min(48), // up to 48 chars wide
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                err,
+                Style::default()
+                    .fg(Color::Red)
+                    .bg(Color::Reset)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Left)
+            .block(Block::default().borders(Borders::NONE)),
+            error_area,
+        );
+    }
 }
 
 /// Helper: give a rect of fixed size (w, h) centered inside parent

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 pub enum Page {
     Auth,
     Home,
@@ -28,7 +30,7 @@ impl InputBox {
     }
     pub fn display(&self) -> String {
         if self.is_password {
-            "*".repeat(self.value.len())
+            "bla".repeat(self.value.len())
         } else {
             self.value.clone()
         }
@@ -41,14 +43,22 @@ pub struct App {
     pub input_boxes: Vec<InputBox>,
     pub focus: usize,
     pub error: Option<String>,
+    pub error_time: Option<Instant>, // <-- add this line
     pub token: Option<String>,
     pub is_loading: bool,
     pub chat_messages: Vec<crate::chat_tui::ChatMessage>,
     pub chat_input: String,
-    pub show_cmd_popup: bool,
-    pub cmd_input: String,
     pub should_quit: bool,
-    // Add your chat state here if needed
+    pub icon_index: usize,
+    pub icons: Vec<&'static str>,
+    pub current_icon: String,
+    pub chat_scroll: u16,
+    pub input_scroll: u16,
+    pub input_cursor: usize,
+    pub input_width: usize,
+    pub last_sent: Option<std::time::Instant>,
+    pub auto_scroll: bool,
+    pub max_scroll: u16,
 }
 
 impl App {
@@ -63,13 +73,64 @@ impl App {
             ],
             focus: 0,
             error: None,
+            error_time: None, // <-- initialize here
             token: None,
             is_loading: false,
             chat_input: String::new(),
             chat_messages: Vec::new(),
             should_quit: false,
-            cmd_input: String::new(),
-            show_cmd_popup: false,
+            icon_index: 0,
+            icons: vec![
+                "󰱨",
+                "󰱩",
+                "󰱫",
+                "󰄛",
+                "󰊖",
+                "󱃞",
+                "󰱬",
+                "󰱮",
+                "󰱯",
+                "󰱰",
+                "󰽌",
+                "󰱱",
+                "󰱲",
+                "󱈔",
+                "󰱸",
+                "󰇳",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "󱢯",
+                "",
+                "󰇟",
+                "󰞅",
+                "🤓👆",
+                "🗿",
+                "🧑‍💻",
+                "󰱴",
+                "󰇷",
+                "󱕼",
+                "󰇹",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ],
+            current_icon: String::new(),
+            input_cursor: 0,
+            chat_scroll: 0,
+            input_scroll: 0,
+            input_width: 0,
+            last_sent: None,
+            auto_scroll: true,
+            max_scroll: 0,
         }
     }
 }
